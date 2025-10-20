@@ -35,7 +35,7 @@ public class FileWatcherSettings implements PersistentStateComponent<FileWatcher
         public boolean isInSource = true;
         public boolean isInTestSource = true;
         public boolean isInGeneratedSource = true;
-        public boolean isInContent = true;
+        public boolean isInContent = false;
         public boolean autoReloadEnabled = true;
         public boolean autoRebuildEnabled = true;
         public int debounceDelayMs = 500;
