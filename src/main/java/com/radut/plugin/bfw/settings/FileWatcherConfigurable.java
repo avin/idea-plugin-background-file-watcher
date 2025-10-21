@@ -4,6 +4,7 @@ import com.intellij.openapi.options.Configurable;
 import com.intellij.openapi.options.ConfigurationException;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.NlsContexts;
+import com.radut.plugin.bfw.FileWatcherService;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -15,6 +16,7 @@ public class FileWatcherConfigurable implements Configurable {
 
     private final Project project;
     private FileWatcherSettingsComponent settingsComponent;
+    private FileWatcherService.StateChangeListener stateChangeListener;
 
     public FileWatcherConfigurable(@NotNull Project project) {
         this.project = project;
@@ -30,93 +32,144 @@ public class FileWatcherConfigurable implements Configurable {
     @Override
     public JComponent createComponent() {
         settingsComponent = new FileWatcherSettingsComponent();
+
+        // Set up button listeners
+        FileWatcherService service = project.getService(FileWatcherService.class);
+
+        settingsComponent.getStartButton().addActionListener(e -> {
+            if (service != null) {
+                service.startWatching();
+            }
+        });
+
+        settingsComponent.getStopButton().addActionListener(e -> {
+            if (service != null) {
+                service.stopWatching();
+            }
+        });
+
+        // Register state change listener
+        if (service != null) {
+            stateChangeListener = this::updateButtonStates;
+            service.addStateChangeListener(stateChangeListener);
+        }
+
+        // Update initial button states
+        updateButtonStates();
+
         return settingsComponent.getPanel();
+    }
+
+    private void updateButtonStates() {
+        FileWatcherService service = project.getService(FileWatcherService.class);
+        if (service != null && settingsComponent != null) {
+            settingsComponent.updateControlStatus(service.isRunning());
+        }
+    }
+
+    /**
+     * Validates regex patterns in a filter string.
+     * Eliminates code duplication between included and ignored regex validation.
+     *
+     * @param filterString Multi-line string of regex patterns to validate
+     * @param filterType   Type of filter for error messages ("included" or "ignored")
+     * @throws ConfigurationException if any pattern is invalid
+     */
+    private void validateRegexPatterns(String filterString, String filterType) throws ConfigurationException {
+        if (filterString != null && !filterString.trim().isEmpty()) {
+            String[] patterns = filterString.split("\n");
+            for (int i = 0; i < patterns.length; i++) {
+                String pattern = patterns[i].trim();
+                if (!pattern.isEmpty()) {
+                    try {
+                        Pattern.compile(pattern);
+                    } catch (PatternSyntaxException e) {
+                        throw new ConfigurationException(
+                                "Invalid " + filterType + " regex pattern on line " + (i + 1) +
+                                ": " + pattern + "\nError: " + e.getMessage()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     @Override
     public boolean isModified() {
         FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
-        FileWatcherSettings.State state = settings.getState();
+        FileWatcherState state = settings.getState();
 
-        return settingsComponent.isInContent() != state.isInContent ||
-               settingsComponent.isInSource() != state.isInSource ||
-               settingsComponent.isInTestSource() != state.isInTestSource ||
-               settingsComponent.isInGeneratedSource() != state.isInGeneratedSource ||
-               settingsComponent.isAutoReloadEnabled() != state.autoReloadEnabled ||
-               settingsComponent.isAutoRebuildEnabled() != state.autoRebuildEnabled ||
-               settingsComponent.getDebounceDelayMs() != state.debounceDelayMs ||
-               !settingsComponent.getPathRegexFilters().equals(state.pathRegexFilters) ||
-               !settingsComponent.getIgnoredRegexFilters().equals(state.ignoredRegexFilters);
+        return settingsComponent.isInContent() != state.isInContent() ||
+               settingsComponent.isInSource() != state.isInSource() ||
+               settingsComponent.isInTestSource() != state.isInTestSource() ||
+               settingsComponent.isAutoReloadEnabled() != state.isAutoReloadEnabled() ||
+               settingsComponent.isAutoRebuildEnabled() != state.isAutoRebuildEnabled() ||
+               settingsComponent.getDebounceDelayMs() != state.getDebounceDelayMs() ||
+               !settingsComponent.getPathRegexFilters().equals(state.getPathRegexFilters()) ||
+               !settingsComponent.getIgnoredRegexFilters().equals(state.getIgnoredRegexFilters());
     }
 
     @Override
     public void apply() throws ConfigurationException {
-        // Validate included regex patterns
-        String regexFilters = settingsComponent.getPathRegexFilters();
-        if (regexFilters != null && !regexFilters.trim().isEmpty()) {
-            String[] patterns = regexFilters.split("\n");
-            for (int i = 0; i < patterns.length; i++) {
-                String pattern = patterns[i].trim();
-                if (!pattern.isEmpty()) {
-                    try {
-                        Pattern.compile(pattern);
-                    } catch (PatternSyntaxException e) {
-                        throw new ConfigurationException(
-                                "Invalid included regex pattern on line " + (i + 1) + ": " + pattern + "\nError: " + e.getMessage()
-                        );
-                    }
-                }
-            }
-        }
-
-        // Validate ignored regex patterns
-        String ignoredRegexFilters = settingsComponent.getIgnoredRegexFilters();
-        if (ignoredRegexFilters != null && !ignoredRegexFilters.trim().isEmpty()) {
-            String[] patterns = ignoredRegexFilters.split("\n");
-            for (int i = 0; i < patterns.length; i++) {
-                String pattern = patterns[i].trim();
-                if (!pattern.isEmpty()) {
-                    try {
-                        Pattern.compile(pattern);
-                    } catch (PatternSyntaxException e) {
-                        throw new ConfigurationException(
-                                "Invalid ignored regex pattern on line " + (i + 1) + ": " + pattern + "\nError: " + e.getMessage()
-                        );
-                    }
-                }
-            }
-        }
+        // Validate regex patterns using utility method
+        validateRegexPatterns(settingsComponent.getPathRegexFilters(), "included");
+        validateRegexPatterns(settingsComponent.getIgnoredRegexFilters(), "ignored");
 
         FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
-        settings.setIsInContent(settingsComponent.isInContent());
-        settings.setIsInSource(settingsComponent.isInSource());
-        settings.setIsInTestSource(settingsComponent.isInTestSource());
-        settings.setIsInGeneratedSource(settingsComponent.isInGeneratedSource());
+
+        // Check if settings that affect watched directories are changing
+        boolean watchSettingsChanged =
+            settingsComponent.isInContent() != settings.isInContent() ||
+            settingsComponent.isInSource() != settings.isInSource() ||
+            settingsComponent.isInTestSource() != settings.isInTestSource() ||
+            settingsComponent.getDebounceDelayMs() != settings.getDebounceDelayMs();
+
+        settings.setInContent(settingsComponent.isInContent());
+        settings.setInSource(settingsComponent.isInSource());
+        settings.setInTestSource(settingsComponent.isInTestSource());
         settings.setAutoReloadEnabled(settingsComponent.isAutoReloadEnabled());
         settings.setAutoRebuildEnabled(settingsComponent.isAutoRebuildEnabled());
         settings.setDebounceDelayMs(settingsComponent.getDebounceDelayMs());
         settings.setPathRegexFilters(settingsComponent.getPathRegexFilters());
         settings.setIgnoredRegexFilters(settingsComponent.getIgnoredRegexFilters());
+
+        // Restart watchers if watch-related settings changed
+        if (watchSettingsChanged) {
+            FileWatcherService service = project.getService(FileWatcherService.class);
+            if (service != null && service.isRunning()) {
+                service.restartWatchers();
+            }
+        }
     }
 
     @Override
     public void reset() {
         FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
-        FileWatcherSettings.State state = settings.getState();
+        FileWatcherState state = settings.getState();
 
-        settingsComponent.setIsInContent(state.isInContent);
-        settingsComponent.setIsInSource(state.isInSource);
-        settingsComponent.setIsInTestSource(state.isInTestSource);
-        settingsComponent.setIsInGeneratedSource(state.isInGeneratedSource);
-        settingsComponent.setAutoReloadEnabled(state.autoReloadEnabled);
-        settingsComponent.setAutoRebuildEnabled(state.autoRebuildEnabled);
-        settingsComponent.setDebounceDelayMs(state.debounceDelayMs);
-        settingsComponent.setPathRegexFilters(state.pathRegexFilters);
-        settingsComponent.setIgnoredRegexFilters(state.ignoredRegexFilters);
+        settingsComponent.setIsInContent(state.isInContent());
+        settingsComponent.setIsInSource(state.isInSource());
+        settingsComponent.setIsInTestSource(state.isInTestSource());
+        settingsComponent.setAutoReloadEnabled(state.isAutoReloadEnabled());
+        settingsComponent.setAutoRebuildEnabled(state.isAutoRebuildEnabled());
+        settingsComponent.setDebounceDelayMs(state.getDebounceDelayMs());
+        settingsComponent.setPathRegexFilters(state.getPathRegexFilters());
+        settingsComponent.setIgnoredRegexFilters(state.getIgnoredRegexFilters());
+
+        // Update button states based on current service status
+        updateButtonStates();
     }
 
     @Override
     public void disposeUIResources() {
+        // Unregister state change listener
+        if (stateChangeListener != null) {
+            FileWatcherService service = project.getService(FileWatcherService.class);
+            if (service != null) {
+                service.removeStateChangeListener(stateChangeListener);
+            }
+            stateChangeListener = null;
+        }
         settingsComponent = null;
     }
 }

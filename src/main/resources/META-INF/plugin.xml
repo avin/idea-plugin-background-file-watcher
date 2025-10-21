@@ -36,4 +36,21 @@
                 factoryClass="com.radut.plugin.bfw.toolwindow.FileWatcherToolWindowFactory"
                 icon="AllIcons.Actions.Refresh"/>
     </extensions>
+
+    <projectListeners>
+        <!-- Listen for project structure changes to restart watchers -->
+        <listener class="com.radut.plugin.bfw.ProjectRootsChangeListener"
+                  topic="com.intellij.openapi.roots.ModuleRootListener"/>
+    </projectListeners>
+
+    <actions>
+        <!-- Add toggle file watcher action to the toolbar, next to build -->
+        <action id="com.radut.plugin.bfw.ToggleFileWatcher"
+                class="com.radut.plugin.bfw.actions.ToggleFileWatcherAction"
+                text="Toggle File Watching"
+                description="Enable or disable file watching"
+                icon="AllIcons.Actions.Refresh">
+            <add-to-group group-id="ToolbarRunGroup" anchor="after" relative-to-action="BuildMenu"/>
+        </action>
+    </actions>
 </idea-plugin>

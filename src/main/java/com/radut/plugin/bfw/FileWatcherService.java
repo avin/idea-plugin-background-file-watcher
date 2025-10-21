@@ -3,69 +3,102 @@ package com.radut.plugin.bfw;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.AnAction;
-import com.intellij.openapi.actionSystem.AnActionEvent;
-import com.intellij.openapi.actionSystem.DataContext;
-import com.intellij.openapi.actionSystem.ex.ActionUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.module.ModuleManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.roots.ModuleRootManager;
-import com.intellij.openapi.roots.ProjectFileIndex;
 import com.intellij.openapi.roots.SourceFolder;
+import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowManager;
+import com.intellij.ui.content.Content;
 import com.radut.plugin.bfw.settings.FileWatcherSettings;
+import com.radut.plugin.bfw.settings.FileWatcherState;
 import com.radut.plugin.bfw.toolwindow.FileWatcherToolWindowContent;
 import com.radut.plugin.bfw.toolwindow.FileWatcherToolWindowFactory;
-import com.intellij.ui.content.Content;
+import com.radut.plugin.bfw.watcher.RecursiveDirectoryWatcher;
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.jps.model.java.JavaSourceRootType;
 
 import java.io.IOException;
-import java.nio.file.FileSystems;
-import java.nio.file.FileVisitResult;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
-import java.nio.file.WatchKey;
-import java.nio.file.WatchService;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 public class FileWatcherService implements Disposable {
     private static final Logger LOG = Logger.getInstance(FileWatcherService.class);
+
     private static final String SYNC_ACTION_ID = "Synchronize";
     private static final String BUILD_ACTION_ID = "CompileDirty";
-
+    private static final String SAVE_ACTION_ID = "SaveAll";
     private static final String TOOL_WINDOW_ID = "File Watcher";
-
-    private static final int REBUILD_DELAY_MS = 500;
     private static final int SHUTDOWN_TIMEOUT_SECONDS = 5;
-    private static final int WATCH_POLL_TIMEOUT_MS = 200;
 
     private final Project project;
-    private WatchService watchService;
-    private final Map<WatchKey, Path> watchKeys = new ConcurrentHashMap<>();
-    private Thread watchThread;
     private volatile boolean running = false;
+    private volatile boolean scheduledActions = false;
     private final ScheduledExecutorService debounceExecutor;
-    private volatile boolean reloadScheduled = false;
+    private final Object controlLock = new Object();
+
+    // Multiple watchers for different directory sets
+    private final List<RecursiveDirectoryWatcher> activeWatchers = new ArrayList<>();
+
+    // Listeners for state changes
+    private final List<StateChangeListener> stateChangeListeners = new ArrayList<>();
+
+    /**
+     * Listener interface for file watcher state changes.
+     */
+    public interface StateChangeListener {
+        void onStateChanged();
+    }
+
+    /**
+     * Register a listener for state changes.
+     */
+    public void addStateChangeListener(StateChangeListener listener) {
+        synchronized (stateChangeListeners) {
+            stateChangeListeners.add(listener);
+        }
+    }
+
+    /**
+     * Unregister a listener for state changes.
+     */
+    public void removeStateChangeListener(StateChangeListener listener) {
+        synchronized (stateChangeListeners) {
+            stateChangeListeners.remove(listener);
+        }
+    }
+
+    /**
+     * Notify all listeners of state changes.
+     */
+    private void notifyStateChanged() {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            synchronized (stateChangeListeners) {
+                for (StateChangeListener listener : stateChangeListeners) {
+                    listener.onStateChanged();
+                }
+            }
+        });
+    }
 
     public FileWatcherService(@NotNull Project project) {
         this.project = project;
@@ -73,327 +106,352 @@ public class FileWatcherService implements Disposable {
     }
 
     public void startWatching() {
-        if (running) {
-            LOG.info("File watcher already running");
-            return;
-        }
-
-        try {
-            watchService = FileSystems.getDefault().newWatchService();
-            String basePath = project.getBasePath();
-            if (basePath == null) {
-                LOG.warn("Project base path is null, cannot start watching");
+        synchronized (controlLock) {
+            if (running) {
+                LOG.warn("File watcher already running for project: " + project.getName());
                 return;
             }
 
-            Path projectPath = Paths.get(basePath);
-            registerDirectories(projectPath);
+            if (project.isDisposed()) {
+                LOG.warn("Cannot start file watcher - project is disposed: " + project.getName());
+                return;
+            }
 
-            running = true;
-            watchThread = new Thread(this::watchForChanges, "FileWatcher-" + project.getName());
-            watchThread.setDaemon(true);
-            watchThread.start();
+            try {
+                LOG.info("Starting file watcher for project: " + project.getName());
 
-            LOG.info("Started watching files in project: " + project.getName());
-        } catch (IOException e) {
-            LOG.error("Failed to start file watching", e);
+                running = true;
+
+                // Start watchers based on current settings
+                startWatchersBasedOnSettings();
+
+                LOG.info("File watcher started successfully for project: " + project.getName());
+
+                saveAndSyncStateToProjectWorkspace(true);
+
+            } catch (Exception e) {
+                LOG.error("Unexpected error starting file watcher for project: " + project.getName(), e);
+                running = false;
+                stopAllWatchers();
+            }
         }
     }
 
-    private void registerDirectories(Path root) throws IOException {
-        ProjectFileIndex fileIndex = ProjectFileIndex.getInstance(project);
+    /**
+     * Starts the appropriate watchers based on current settings.
+     */
+    private synchronized void startWatchersBasedOnSettings() {
+        FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
 
-        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                // Use read action to access VFS safely
-                return ApplicationManager.getApplication().runReadAction((com.intellij.openapi.util.Computable<FileVisitResult>) () -> {
-                    // Use IntelliJ's VFS to check if this directory should be excluded
-                    VirtualFile vFile = VirtualFileManager.getInstance().findFileByNioPath(dir);
+        RecursiveDirectoryWatcher.WatchListener listener = (final WatchEvent.Kind<?> kind, final Path fileName) -> onFileChangesDetected(kind, fileName);
 
-                    if (vFile != null) {
-                        // Check if this is an excluded directory (build output, etc.)
-                        if (fileIndex.isExcluded(vFile)) {
-                            LOG.debug("Skipping excluded directory: " + dir);
-                            return FileVisitResult.SKIP_SUBTREE;
-                        }
+        try {
+            // Watch source folders if enabled
+            if (settings.isInSource()) {
+                List<VirtualFile> sourceRoots = getSourceRoots();
+                for (VirtualFile sourceRoot : sourceRoots) {
+                    Path sourcePath = Paths.get(sourceRoot.getPath());
+                    RecursiveDirectoryWatcher watcher = new RecursiveDirectoryWatcher(
+                            sourcePath,
+                            Collections.emptySet(),
+                            listener
+                    );
+                    watcher.start();
+                    activeWatchers.add(watcher);
+                    LOG.info("Started watcher for source root: " + sourcePath);
+                }
+            }
 
-                        // Skip .git and .idea directories explicitly
-                        String dirName = dir.getFileName() != null ? dir.getFileName().toString() : "";
-                        if (dirName.equals(".git") || dirName.equals(".idea")) {
-                            LOG.debug("Skipping special directory: " + dir);
-                            return FileVisitResult.SKIP_SUBTREE;
-                        }
-                    }
+            // Watch test source folders if enabled
+            if (settings.isInTestSource()) {
+                List<VirtualFile> testSourceRoots = getTestSourceRoots();
+                for (VirtualFile testSourceRoot : testSourceRoots) {
+                    Path testSourcePath = Paths.get(testSourceRoot.getPath());
+                    RecursiveDirectoryWatcher watcher = new RecursiveDirectoryWatcher(
+                            testSourcePath,
+                            Collections.emptySet(),
+                            listener
+                    );
+                    watcher.start();
+                    activeWatchers.add(watcher);
+                    LOG.info("Started watcher for test source root: " + testSourcePath);
+                }
+            }
 
-                    try {
-                        WatchKey key = dir.register(
-                                watchService,
-                                StandardWatchEventKinds.ENTRY_CREATE,
-                                StandardWatchEventKinds.ENTRY_MODIFY,
-                                StandardWatchEventKinds.ENTRY_DELETE
-                        );
-                        watchKeys.put(key, dir);
-                        LOG.debug("Registered watch for directory: " + dir);
-                    } catch (IOException e) {
-                        LOG.warn("Failed to register watch for directory: " + dir, e);
-                    }
+            // Watch project content (excluding source roots, test source roots, and excluded folders)
+            if (settings.isInContent()) {
+                List<VirtualFile> contentRoots = getContentRoots();
+                Set<Path> exclusions = new HashSet<>();
 
-                    return FileVisitResult.CONTINUE;
-                });
+                // Add source roots to exclusions
+                for (VirtualFile sourceRoot : getSourceRoots()) {
+                    exclusions.add(Paths.get(sourceRoot.getPath()));
+                }
+
+                // Add test source roots to exclusions
+                for (VirtualFile testSourceRoot : getTestSourceRoots()) {
+                    exclusions.add(Paths.get(testSourceRoot.getPath()));
+                }
+
+                // Add excluded folders to exclusions
+                for (VirtualFile excludedFolder : getExcludedFolders()) {
+                    exclusions.add(Paths.get(excludedFolder.getPath()));
+                }
+
+                for (VirtualFile contentRoot : contentRoots) {
+                    Path contentPath = Paths.get(contentRoot.getPath());
+                    RecursiveDirectoryWatcher watcher = new RecursiveDirectoryWatcher(
+                            contentPath,
+                            exclusions,
+                            listener
+                    );
+                    watcher.start();
+                    activeWatchers.add(watcher);
+                    LOG.info("Started watcher for content root: " + contentPath + " with " + exclusions.size() + " exclusions");
+                }
+            }
+
+            // Notify listeners that watchers have been started
+            notifyStateChanged();
+
+        } catch (IOException e) {
+            LOG.error("Failed to start watchers", e);
+            stopAllWatchers();
+            throw new RuntimeException("Failed to start file watchers", e);
+        }
+    }
+
+    /**
+     * Restarts all watchers with the current settings. Call this when preferences are changed.
+     */
+    public void restartWatchers() {
+        synchronized (controlLock) {
+            LOG.info("Restarting file watchers for project: " + project.getName());
+
+            // Stop existing watchers
+            stopAllWatchers();
+
+            // Only restart if watching is enabled
+            if (running) {
+                // Start new watchers with updated settings
+                startWatchersBasedOnSettings();
+                LOG.info("File watchers restarted successfully");
+            }
+        }
+    }
+
+    /**
+     * Stops all active watchers.
+     */
+    private synchronized void stopAllWatchers() {
+        for (RecursiveDirectoryWatcher watcher : activeWatchers) {
+            try {
+                watcher.stop();
+            } catch (Exception e) {
+                LOG.warn("Error stopping watcher for: " + watcher.getRootPath(), e);
+            }
+        }
+        activeWatchers.clear();
+
+        // Notify listeners that watchers have been stopped
+        notifyStateChanged();
+    }
+
+    /**
+     * Called when file changes are detected by any watcher.
+     */
+    private void onFileChangesDetected(final WatchEvent.Kind<?> kind, final Path fileName) {
+        LOG.info("File changes detected: " + kind + " - " + fileName);
+
+        FileCheckResult fileCheckResult = checkFile(fileName);
+        if (fileCheckResult != null) {
+            if (fileCheckResult.isShouldProcess()) {
+                logToToolWindow(kind.name(), fileCheckResult.getMatchedRule(), fileCheckResult.getDetails(), getRelativePath(fileName));
+                scheduleActions();
+            } else {
+                logIgnoredToToolWindow(kind.name(), fileCheckResult.getMatchedRule(), fileCheckResult.getDetails(), getRelativePath(fileName));
+            }
+        }
+    }
+
+    private void saveAndSyncStateToProjectWorkspace(boolean newStateBoolean) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
+            FileWatcherState newState = settings.getState();
+            if (newState != null) {
+                newState.setEnabled(newStateBoolean);
+                settings.loadState(newState);
+                LOG.info("File watcher enabled state set to " + newStateBoolean + " for project: " + project.getName());
+                triggerAction(SAVE_ACTION_ID);
             }
         });
     }
 
-    private void watchForChanges() {
-        while (running) {
-            WatchKey key;
-            try {
-                key = watchService.poll(WATCH_POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                if (key == null) {
-                    continue;
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-
-            Path dir = watchKeys.get(key);
-            if (dir == null) {
-                key.reset();
-                continue;
-            }
-
-            boolean hasRelevantChanges = false;
-            for (WatchEvent<?> event : key.pollEvents()) {
-                WatchEvent.Kind<?> kind = event.kind();
-
-                if (kind == StandardWatchEventKinds.OVERFLOW) {
-                    continue;
-                }
-
-                @SuppressWarnings("unchecked")
-                WatchEvent<Path> pathEvent = (WatchEvent<Path>) event;
-                Path fileName = pathEvent.context();
-                Path fullPath = dir.resolve(fileName);
-
-                // Check if this file should trigger a reload
-                FileCheckResult checkResult = checkFile(fullPath);
-                String changeType = kind.name().replace("ENTRY_", "");
-                if (checkResult.shouldProcess) {
-                    // Format event type: CREATE/MODIFY/DELETE
-                    String relativePath = getRelativePath(fullPath);
-                    LOG.info("Detected " + changeType + " in: " + relativePath + " [" + checkResult.matchedRule + "]");
-                    logToToolWindow(changeType, checkResult.matchedRule, checkResult.details, relativePath);
-                    hasRelevantChanges = true;
-                } else {
-                    // Log ignored event only if there's a valid ignore reason
-                    if (checkResult.details != null && !checkResult.details.isEmpty()) {
-                        String relativePath = getRelativePath(fullPath);
-                        logIgnoredToToolWindow(changeType, checkResult.matchedRule != null ? checkResult.matchedRule : "N/A",
-                                checkResult.details,
-                                relativePath);
-                    }
-                }
-
-                // If a new directory was created, register it for watching
-                if (kind == StandardWatchEventKinds.ENTRY_CREATE && Files.isDirectory(fullPath)) {
-                    try {
-                        registerDirectories(fullPath);
-                    } catch (IOException e) {
-                        LOG.warn("Failed to register new directory: " + fullPath, e);
-                    }
-                }
-            }
-
-            boolean valid = key.reset();
-            if (!valid) {
-                watchKeys.remove(key);
-            }
-
-            if (hasRelevantChanges) {
-                scheduleReload();
+    public void toggleWatchingState() {
+        synchronized (controlLock) {
+            if (running) {
+                stopWatching();
+            } else {
+                startWatching();
             }
         }
     }
 
-    private static class FileCheckResult {
-        boolean shouldProcess;
-        String matchedRule;
-        String details;
+    public void stopWatching() {
+        synchronized (controlLock) {
+            if (!running) {
+                LOG.info("File watcher is not running");
+                return;
+            }
 
-        FileCheckResult(boolean shouldProcess, String matchedRule, String details) {
-            this.shouldProcess = shouldProcess;
-            this.matchedRule = matchedRule;
-            this.details = details;
+            LOG.info("Stopping file watcher for project: " + project.getName());
+            running = false;
+
+            stopAllWatchers();
+
+            saveAndSyncStateToProjectWorkspace(false);
+
+            LOG.info("Stopped watching files in project: " + project.getName());
         }
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
+    private List<VirtualFile> getSourceFoldersByType(Predicate<SourceFolder> filter) {
+        return ApplicationManager.getApplication().runReadAction((Computable<List<VirtualFile>>) () -> {
+            List<VirtualFile> roots = new ArrayList<>();
+            ModuleManager moduleManager = ModuleManager.getInstance(project);
+
+            for (Module module : moduleManager.getModules()) {
+                ModuleRootManager rootManager = ModuleRootManager.getInstance(module);
+                for (var contentEntry : rootManager.getContentEntries()) {
+                    for (SourceFolder sourceFolder : contentEntry.getSourceFolders()) {
+                        if (filter.test(sourceFolder)) {
+                            VirtualFile file = sourceFolder.getFile();
+                            if (file != null) {
+                                roots.add(file);
+                            }
+                        }
+                    }
+                }
+            }
+            return roots;
+        });
     }
 
     private List<VirtualFile> getSourceRoots() {
-        List<VirtualFile> roots = new ArrayList<>();
-        ModuleManager moduleManager = ModuleManager.getInstance(project);
-        for (Module module : moduleManager.getModules()) {
-            ModuleRootManager rootManager = ModuleRootManager.getInstance(module);
-            for (var contentEntry : rootManager.getContentEntries()) {
-                for (SourceFolder sourceFolder : contentEntry.getSourceFolders()) {
-                    if (sourceFolder.getRootType() == JavaSourceRootType.SOURCE) {
-                        VirtualFile file = sourceFolder.getFile();
-                        if (file != null) {
-                            roots.add(file);
-                        }
-                    }
-                }
-            }
-        }
-        return roots;
+        return getSourceFoldersByType(sf -> sf.getRootType() == JavaSourceRootType.SOURCE);
     }
 
     private List<VirtualFile> getTestSourceRoots() {
-        List<VirtualFile> roots = new ArrayList<>();
-        ModuleManager moduleManager = ModuleManager.getInstance(project);
-        for (Module module : moduleManager.getModules()) {
-            ModuleRootManager rootManager = ModuleRootManager.getInstance(module);
-            for (var contentEntry : rootManager.getContentEntries()) {
-                for (SourceFolder sourceFolder : contentEntry.getSourceFolders()) {
-                    if (sourceFolder.getRootType() == JavaSourceRootType.TEST_SOURCE) {
-                        VirtualFile file = sourceFolder.getFile();
-                        if (file != null) {
-                            roots.add(file);
-                        }
-                    }
-                }
-            }
-        }
-        return roots;
+        return getSourceFoldersByType(sf -> sf.getRootType() == JavaSourceRootType.TEST_SOURCE);
     }
 
-    private List<VirtualFile> getGeneratedSourceRoots() {
-        List<VirtualFile> roots = new ArrayList<>();
-        ModuleManager moduleManager = ModuleManager.getInstance(project);
-        for (Module module : moduleManager.getModules()) {
-            ModuleRootManager rootManager = ModuleRootManager.getInstance(module);
-            for (VirtualFile root : rootManager.getSourceRoots(false)) {
-                if (root.getPath().contains("generated")) {
-                    roots.add(root);
+    private List<VirtualFile> getExcludedFolders() {
+        return ApplicationManager.getApplication().runReadAction((Computable<List<VirtualFile>>) () -> {
+            List<VirtualFile> roots = new ArrayList<>();
+            ModuleManager moduleManager = ModuleManager.getInstance(project);
+            for (Module module : moduleManager.getModules()) {
+                ModuleRootManager rootManager = ModuleRootManager.getInstance(module);
+                for (var contentEntry : rootManager.getContentEntries()) {
+                    roots.addAll(Arrays.asList(contentEntry.getExcludeFolderFiles()));
                 }
             }
-        }
-        return roots;
+            return roots;
+        });
     }
 
     private List<VirtualFile> getContentRoots() {
-        List<VirtualFile> roots = new ArrayList<>();
-        ModuleManager moduleManager = ModuleManager.getInstance(project);
-        for (Module module : moduleManager.getModules()) {
-            ModuleRootManager rootManager = ModuleRootManager.getInstance(module);
-            for (VirtualFile contentRoot : rootManager.getContentRoots()) {
-                roots.add(contentRoot);
+        return ApplicationManager.getApplication().runReadAction((Computable<List<VirtualFile>>) () -> {
+            List<VirtualFile> roots = new ArrayList<>();
+            ModuleManager moduleManager = ModuleManager.getInstance(project);
+
+            for (Module module : moduleManager.getModules()) {
+                ModuleRootManager rootManager = ModuleRootManager.getInstance(module);
+                for (VirtualFile contentRoot : rootManager.getContentRoots()) {
+                    roots.add(contentRoot);
+                }
             }
-        }
-        return roots;
+            return roots;
+        });
     }
 
-    private boolean isPathUnderRoot(Path path, VirtualFile root) {
-        String pathStr = path.toString();
-        String rootPath = root.getPath();
-        return pathStr.startsWith(rootPath);
+    /**
+     * Checks if path matches any pattern in the filter string.
+     */
+    private String matchesAnyPattern(String pathStr, String filterString) {
+        if (filterString == null || filterString.trim().isEmpty()) {
+            return null;
+        }
+
+        String[] patterns = filterString.split("\n");
+        for (String patternStr : patterns) {
+            patternStr = patternStr.trim();
+            if (patternStr.isEmpty()) {
+                continue;
+            }
+
+            try {
+                Pattern pattern = Pattern.compile(patternStr);
+                if (pattern.matcher(pathStr).find()) {
+                    return patternStr;
+                }
+            } catch (PatternSyntaxException e) {
+                LOG.warn("Invalid regex pattern: " + patternStr, e);
+            }
+        }
+        return null;
     }
 
     private FileCheckResult checkFile(Path path) {
-        // This method needs read action to query VFS
-        return ApplicationManager.getApplication().runReadAction((com.intellij.openapi.util.Computable<FileCheckResult>) () -> {
+        return ApplicationManager.getApplication().runReadAction((Computable<FileCheckResult>) () -> {
             FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
             String pathStr = path.toString();
             if (pathStr.startsWith(project.getBasePath())) {
                 pathStr = pathStr.substring(project.getBasePath().length() + 1);
             }
 
-            // First, check ignored regex filters - if matches any, ignore the file
-            String ignoredRegexFilters = settings.getIgnoredRegexFilters();
-            if (ignoredRegexFilters != null && !ignoredRegexFilters.trim().isEmpty()) {
-                String[] patterns = ignoredRegexFilters.split("\n");
-                for (String patternStr : patterns) {
-                    patternStr = patternStr.trim();
-                    if (patternStr.isEmpty()) {
-                        continue;
-                    }
+            // Check ignored regex filters first
+            String ignoredMatch = matchesAnyPattern(pathStr, settings.getIgnoredRegexFilters());
+            if (ignoredMatch != null) {
+                return new FileCheckResult(false, "Ignore Regex", ignoredMatch);
+            }
 
-                    try {
-                        Pattern pattern = Pattern.compile(patternStr);
-                        if (pattern.matcher(pathStr).find()) {
-                            return new FileCheckResult(false, "Ignore Regex", patternStr);
+            if (fileIsPartOf(path, getSourceRoots())) {
+                return new FileCheckResult(settings.isInSource(), "InSource", null);
+            }
+
+            if (fileIsPartOf(path, getTestSourceRoots())) {
+                return new FileCheckResult(settings.isInTestSource(), "InTestSource", null);
+            }
+
+            if (fileIsPartOf(path, getContentRoots())) {
+                if (!fileIsPartOf(path, getSourceRoots())
+                    && !fileIsPartOf(path, getTestSourceRoots())
+                    && !fileIsPartOf(path, getExcludedFolders())) {
+
+                    if (StringUtils.isNotBlank(settings.getPathRegexFilters())) {
+                        // Apply included regex filters
+                        String includedMatch = matchesAnyPattern(pathStr, settings.getPathRegexFilters());
+                        if (includedMatch != null) {
+                            return new FileCheckResult(true, "InProjectContent Regex: " + includedMatch, null);
                         }
-                    } catch (PatternSyntaxException e) {
-                        LOG.warn("Invalid ignored regex pattern: " + patternStr, e);
                     }
+                    return new FileCheckResult(settings.isInContent(), "InProjectContent", null);
                 }
             }
 
-            // Check if included regex is configured
-            String regexFilters = settings.getPathRegexFilters();
-            boolean hasIncludedRegex = regexFilters != null && !regexFilters.trim().isEmpty();
-
-
-            if (settings.isInGeneratedSource()) {
-                for (VirtualFile root : getGeneratedSourceRoots()) {
-                    if (isPathUnderRoot(path, root)) {
-                        return new FileCheckResult(true, "InGeneratedSource", null);
-                    }
-                }
-            }
-
-            if (settings.isInSource()) {
-                for (VirtualFile root : getSourceRoots()) {
-                    if (isPathUnderRoot(path, root)) {
-                        return new FileCheckResult(true, "InSource", null);
-                    }
-                }
-            }
-
-            if (settings.isInTestSource()) {
-                for (VirtualFile root : getTestSourceRoots()) {
-                    if (isPathUnderRoot(path, root)) {
-                        return new FileCheckResult(true, "InTestSource", null);
-                    }
-                }
-            }
-
-
-            if (settings.isInContent()) {
-                for (VirtualFile root : getContentRoots()) {
-                    if (isPathUnderRoot(path, root)) {
-                        return new FileCheckResult(true, "InProjectContent", null);
-                    }
-                }
-            }
-
-            // Apply included regex filters
-            if (hasIncludedRegex) {
-                String[] patterns = regexFilters.split("\n");
-                for (String patternStr : patterns) {
-                    patternStr = patternStr.trim();
-                    if (patternStr.isEmpty()) {
-                        continue;
-                    }
-
-                    try {
-                        Pattern pattern = Pattern.compile(patternStr);
-                        if (pattern.matcher(pathStr).find()) {
-                            return new FileCheckResult(true, "Regex: " + patternStr, null);
-                        }
-                    } catch (PatternSyntaxException e) {
-                        LOG.warn("Invalid included regex pattern: " + patternStr, e);
-                    }
-                }
-            }
 
             // No filters matched - reject the file
             return new FileCheckResult(false, "None", "No filters matched");
         });
     }
 
-    private boolean shouldProcessFile(Path path) {
-        return checkFile(path).shouldProcess;
+    private boolean fileIsPartOf(final Path path, final List<VirtualFile> virtualFile) {
+        return virtualFile.stream()
+                .anyMatch(folder -> path.startsWith(folder.getPath()));
     }
 
     private String getRelativePath(Path fullPath) {
@@ -404,7 +462,6 @@ public class FileWatcherService implements Disposable {
                 Path relativePath = projectPath.relativize(fullPath);
                 return relativePath.toString();
             } catch (IllegalArgumentException e) {
-                // Paths are not on the same file system, return full path
                 return fullPath.toString();
             }
         }
@@ -460,83 +517,57 @@ public class FileWatcherService implements Disposable {
         });
     }
 
-    private void scheduleReload() {
+    private void scheduleActions() {
         FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
+        if (settings.isAutoReloadEnabled() || settings.isAutoRebuildEnabled()) {
 
-        if (!settings.isAutoReloadEnabled()) {
-            LOG.info("Auto-reload is disabled in settings, skipping reload");
-            return;
-        }
-
-        synchronized (this) {
-            if (reloadScheduled) {
-                return; // Already scheduled
-            }
-            reloadScheduled = true;
-        }
-
-        int debounceDelay = settings.getDebounceDelayMs();
-        // Debounce: wait configured milliseconds before triggering reload in case more changes come
-        debounceExecutor.schedule(() -> {
-            triggerReloadFromDisk();
             synchronized (this) {
-                reloadScheduled = false;
+                if (scheduledActions) {
+                    return; // Already scheduled
+                }
+                scheduledActions = true;
             }
-        }, debounceDelay, TimeUnit.MILLISECONDS);
+
+            int debounceDelay = settings.getDebounceDelayMs();
+            debounceExecutor.schedule(() -> {
+                try {
+                    if (settings.isAutoReloadEnabled()) {
+                        triggerAction(SYNC_ACTION_ID);
+                    }
+                    if (settings.isAutoRebuildEnabled()) {
+                        triggerAction(BUILD_ACTION_ID);
+                    }
+                } finally {
+                    synchronized (this) {
+                        scheduledActions = false;
+                    }
+                }
+            }, debounceDelay, TimeUnit.MILLISECONDS);
+        }
     }
 
-    private void triggerReloadFromDisk() {
+    private void triggerAction(String actionId) {
         ApplicationManager.getApplication().invokeLater(() -> {
             try {
                 ActionManager actionManager = ActionManager.getInstance();
-
-                // First, trigger synchronize to reload files from disk
-                AnAction syncAction = actionManager.getAction(SYNC_ACTION_ID);
-                if (syncAction != null) {
-                    LOG.warn("==> SYNCHRONIZE ACTION TRIGGERED - Reloading files from disk for project: " + project.getName());
-
-                    actionManager.tryToExecute(syncAction, null, null, "Background Action", true);
-                    LOG.warn("==> SYNCHRONIZE ACTION COMPLETED for project: " + project.getName());
-
-                    // Then trigger a project rebuild after sync completes if enabled in settings
-                    FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
-                    if (settings.isAutoRebuildEnabled()) {
-                        AnAction rebuildAction = actionManager.getAction(BUILD_ACTION_ID);
-                        if (rebuildAction != null) {
-                            // Schedule rebuild slightly after sync completes
-                            debounceExecutor.schedule(() -> {
-                                ApplicationManager.getApplication().invokeLater(() -> {
-                                    LOG.warn("==> REBUILD ACTION TRIGGERED - Starting project rebuild for: " + project.getName());
-                                    ActionManager.getInstance().tryToExecute(rebuildAction, null, null, "Background Action", true);
-                                    LOG.warn("==> REBUILD ACTION COMPLETED for project: " + project.getName());
-                                });
-                            }, REBUILD_DELAY_MS, TimeUnit.MILLISECONDS);
-                        } else {
-                            LOG.error("Could not find " + BUILD_ACTION_ID + " action for rebuild");
-                        }
-                    } else {
-                        LOG.info("Auto-rebuild is disabled in settings, skipping rebuild");
-                    }
+                AnAction action = actionManager.getAction(actionId);
+                if (action != null) {
+                    LOG.warn("==> " + actionId + " ACTION TRIGGERED - Starting for project: " + project.getName());
+                    ActionManager.getInstance().tryToExecute(action, null, null, "Background Action", true);
+                    LOG.warn("==> " + actionId + " COMPLETED for project: " + project.getName());
                 } else {
-                    LOG.error("Could not find " + SYNC_ACTION_ID + " action");
+                    LOG.error("Could not find " + actionId + " action");
                 }
             } catch (Exception e) {
-                LOG.error("Error triggering reload from disk", e);
+                LOG.error("Error Triggering " + actionId, e);
             }
         });
     }
 
     @Override
     public void dispose() {
-        running = false;
-
-        if (watchThread != null) {
-            watchThread.interrupt();
-            try {
-                watchThread.join(5000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        if (running) {
+            stopWatching();
         }
 
         debounceExecutor.shutdown();
@@ -547,14 +578,6 @@ public class FileWatcherService implements Disposable {
         } catch (InterruptedException e) {
             debounceExecutor.shutdownNow();
             Thread.currentThread().interrupt();
-        }
-
-        if (watchService != null) {
-            try {
-                watchService.close();
-            } catch (IOException e) {
-                LOG.error("Error closing watch service", e);
-            }
         }
 
         LOG.info("File watcher service disposed for project: " + project.getName());

@@ -12,9 +12,9 @@ import org.jetbrains.annotations.Nullable;
     name = "FileWatcherSettings",
     storages = @Storage(StoragePathMacros.WORKSPACE_FILE)
 )
-public class FileWatcherSettings implements PersistentStateComponent<FileWatcherSettings.State> {
+public class FileWatcherSettings implements PersistentStateComponent<FileWatcherState> {
 
-    private State state = new State();
+    private FileWatcherState state = new FileWatcherState();
 
     public static FileWatcherSettings getInstance(@NotNull Project project) {
         return project.getService(FileWatcherSettings.class);
@@ -22,97 +22,85 @@ public class FileWatcherSettings implements PersistentStateComponent<FileWatcher
 
     @Nullable
     @Override
-    public State getState() {
+    public FileWatcherState getState() {
         return state;
     }
 
     @Override
-    public void loadState(@NotNull State state) {
+    public void loadState(@NotNull FileWatcherState state) {
         this.state = state;
     }
 
-    public static class State {
-        public boolean isInSource = true;
-        public boolean isInTestSource = true;
-        public boolean isInGeneratedSource = true;
-        public boolean isInContent = false;
-        public boolean autoReloadEnabled = true;
-        public boolean autoRebuildEnabled = true;
-        public int debounceDelayMs = 500;
-        public String pathRegexFilters = "";
-        public String ignoredRegexFilters = "";
+
+    public boolean isEnabled() {
+        return state.isEnabled();
     }
 
-    // Convenience methods
+    public void setEnabled(final boolean enabled) {
+        state.setEnabled(enabled);
+    }
+
     public boolean isInSource() {
-        return state.isInSource;
+        return state.isInSource();
     }
 
-    public void setIsInSource(boolean value) {
-        state.isInSource = value;
+    public void setInSource(final boolean inSource) {
+        state.setInSource(inSource);
     }
 
     public boolean isInTestSource() {
-        return state.isInTestSource;
+        return state.isInTestSource();
     }
 
-    public void setIsInTestSource(boolean value) {
-        state.isInTestSource = value;
-    }
-
-    public boolean isInGeneratedSource() {
-        return state.isInGeneratedSource;
-    }
-
-    public void setIsInGeneratedSource(boolean value) {
-        state.isInGeneratedSource = value;
+    public void setInTestSource(final boolean inTestSource) {
+        state.setInTestSource(inTestSource);
     }
 
     public boolean isInContent() {
-        return state.isInContent;
+        return state.isInContent();
     }
 
-    public void setIsInContent(boolean value) {
-        state.isInContent = value;
-    }
-
-    public boolean isAutoReloadEnabled() {
-        return state.autoReloadEnabled;
-    }
-
-    public void setAutoReloadEnabled(boolean value) {
-        state.autoReloadEnabled = value;
-    }
-
-    public boolean isAutoRebuildEnabled() {
-        return state.autoRebuildEnabled;
-    }
-
-    public void setAutoRebuildEnabled(boolean value) {
-        state.autoRebuildEnabled = value;
-    }
-
-    public int getDebounceDelayMs() {
-        return state.debounceDelayMs;
-    }
-
-    public void setDebounceDelayMs(int value) {
-        state.debounceDelayMs = value;
+    public void setInContent(final boolean inContent) {
+        state.setInContent(inContent);
     }
 
     public String getPathRegexFilters() {
-        return state.pathRegexFilters;
+        return state.getPathRegexFilters();
     }
 
-    public void setPathRegexFilters(String value) {
-        state.pathRegexFilters = value;
+    public void setIgnoredRegexFilters(final String ignoredRegexFilters) {
+        state.setIgnoredRegexFilters(ignoredRegexFilters);
+    }
+
+    public boolean isAutoReloadEnabled() {
+        return state.isAutoReloadEnabled();
+    }
+
+    public void setAutoRebuildEnabled(final boolean autoRebuildEnabled) {
+        state.setAutoRebuildEnabled(autoRebuildEnabled);
+    }
+
+    public void setAutoReloadEnabled(final boolean autoReloadEnabled) {
+        state.setAutoReloadEnabled(autoReloadEnabled);
+    }
+
+    public void setDebounceDelayMs(final int debounceDelayMs) {
+        state.setDebounceDelayMs(debounceDelayMs);
+    }
+
+    public int getDebounceDelayMs() {
+        return state.getDebounceDelayMs();
+    }
+
+    public boolean isAutoRebuildEnabled() {
+        return state.isAutoRebuildEnabled();
+    }
+
+    public void setPathRegexFilters(final String pathRegexFilters) {
+        state.setPathRegexFilters(pathRegexFilters);
     }
 
     public String getIgnoredRegexFilters() {
-        return state.ignoredRegexFilters;
-    }
-
-    public void setIgnoredRegexFilters(String value) {
-        state.ignoredRegexFilters = value;
+        return state.getIgnoredRegexFilters();
     }
 }
