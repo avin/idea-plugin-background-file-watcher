@@ -9,7 +9,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 @State(
-    name = "FileWatcherSettings",
+    name = "BackgroundFileWatcherSettings",
     storages = @Storage(StoragePathMacros.WORKSPACE_FILE)
 )
 public class FileWatcherSettings implements PersistentStateComponent<FileWatcherState> {

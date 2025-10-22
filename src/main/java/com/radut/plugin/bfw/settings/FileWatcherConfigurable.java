@@ -68,8 +68,8 @@ public class FileWatcherConfigurable implements Configurable {
     }
 
     /**
-     * Validates regex patterns in a filter string.
-     * Eliminates code duplication between included and ignored regex validation.
+     * Validates regex patterns in a filter string. Eliminates code duplication between included and ignored regex
+     * validation.
      *
      * @param filterString Multi-line string of regex patterns to validate
      * @param filterType   Type of filter for error messages ("included" or "ignored")
@@ -99,14 +99,15 @@ public class FileWatcherConfigurable implements Configurable {
         FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
         FileWatcherState state = settings.getState();
 
-        return settingsComponent.isInContent() != state.isInContent() ||
-               settingsComponent.isInSource() != state.isInSource() ||
-               settingsComponent.isInTestSource() != state.isInTestSource() ||
-               settingsComponent.isAutoReloadEnabled() != state.isAutoReloadEnabled() ||
-               settingsComponent.isAutoRebuildEnabled() != state.isAutoRebuildEnabled() ||
-               settingsComponent.getDebounceDelayMs() != state.getDebounceDelayMs() ||
-               !settingsComponent.getPathRegexFilters().equals(state.getPathRegexFilters()) ||
-               !settingsComponent.getIgnoredRegexFilters().equals(state.getIgnoredRegexFilters());
+        return
+                settingsComponent.isInContent() != state.isInContent() ||
+                settingsComponent.isInSource() != state.isInSource() ||
+                settingsComponent.isInTestSource() != state.isInTestSource() ||
+                settingsComponent.isAutoReloadEnabled() != state.isAutoReloadEnabled() ||
+                settingsComponent.isAutoRebuildEnabled() != state.isAutoRebuildEnabled() ||
+                settingsComponent.getDebounceDelayMs() != state.getDebounceDelayMs() ||
+                !settingsComponent.getPathRegexFilters().equals(state.getPathRegexFilters()) ||
+                !settingsComponent.getIgnoredRegexFilters().equals(state.getIgnoredRegexFilters());
     }
 
     @Override
@@ -119,17 +120,17 @@ public class FileWatcherConfigurable implements Configurable {
 
         // Check if settings that affect watched directories are changing
         boolean watchSettingsChanged =
-            settingsComponent.isInContent() != settings.isInContent() ||
-            settingsComponent.isInSource() != settings.isInSource() ||
-            settingsComponent.isInTestSource() != settings.isInTestSource() ||
-            settingsComponent.getDebounceDelayMs() != settings.getDebounceDelayMs();
+                settingsComponent.isInContent() != settings.isInContent() ||
+                settingsComponent.isInSource() != settings.isInSource() ||
+                settingsComponent.isInTestSource() != settings.isInTestSource() ||
+                settingsComponent.getDebounceDelayMs() != settings.getDebounceDelayMs();
 
-        settings.setInContent(settingsComponent.isInContent());
-        settings.setInSource(settingsComponent.isInSource());
-        settings.setInTestSource(settingsComponent.isInTestSource());
         settings.setAutoReloadEnabled(settingsComponent.isAutoReloadEnabled());
         settings.setAutoRebuildEnabled(settingsComponent.isAutoRebuildEnabled());
         settings.setDebounceDelayMs(settingsComponent.getDebounceDelayMs());
+        settings.setInSource(settingsComponent.isInSource());
+        settings.setInTestSource(settingsComponent.isInTestSource());
+        settings.setInContent(settingsComponent.isInContent());
         settings.setPathRegexFilters(settingsComponent.getPathRegexFilters());
         settings.setIgnoredRegexFilters(settingsComponent.getIgnoredRegexFilters());
 
@@ -147,12 +148,12 @@ public class FileWatcherConfigurable implements Configurable {
         FileWatcherSettings settings = FileWatcherSettings.getInstance(project);
         FileWatcherState state = settings.getState();
 
-        settingsComponent.setIsInContent(state.isInContent());
-        settingsComponent.setIsInSource(state.isInSource());
-        settingsComponent.setIsInTestSource(state.isInTestSource());
         settingsComponent.setAutoReloadEnabled(state.isAutoReloadEnabled());
         settingsComponent.setAutoRebuildEnabled(state.isAutoRebuildEnabled());
         settingsComponent.setDebounceDelayMs(state.getDebounceDelayMs());
+        settingsComponent.setIsInSource(state.isInSource());
+        settingsComponent.setIsInTestSource(state.isInTestSource());
+        settingsComponent.setIsInContent(state.isInContent());
         settingsComponent.setPathRegexFilters(state.getPathRegexFilters());
         settingsComponent.setIgnoredRegexFilters(state.getIgnoredRegexFilters());
 

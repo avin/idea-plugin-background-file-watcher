@@ -1,13 +1,16 @@
 package com.radut.plugin.bfw.settings;
 
 public class FileWatcherState {
-    private boolean enabled = true;
-    private boolean isInSource = true;
-    private boolean isInTestSource = true;
-    private boolean isInContent = false;
+    private boolean enabled = false;//by default is not enabled, as we do not want all projects to be watched
+
     private boolean autoReloadEnabled = true;
     private boolean autoRebuildEnabled = true;
     private int debounceDelayMs = 500;
+
+    private boolean isInSource = true;
+    private boolean isInTestSource = false;
+    private boolean isInContent = false;
+
     private String pathRegexFilters = "";
     private String ignoredRegexFilters = "";
 
