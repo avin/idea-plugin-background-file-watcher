@@ -1,12 +1,10 @@
 package com.radut.plugin.bfw.actions;
 
-import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
-import com.intellij.ui.JBColor;
-import com.intellij.util.IconUtil;
 import com.radut.plugin.bfw.FileWatcherService;
+import com.radut.plugin.bfw.Icons;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collections;
@@ -70,12 +68,12 @@ public class ToggleFileWatcherAction extends AnAction {
             presentation.setText("Disable File Watching");
             presentation.setDescription("Stop watching files for changes");
             // Blue eye icon when running
-            presentation.setIcon(IconUtil.colorize(AllIcons.Actions.Show, JBColor.BLUE));
+            presentation.setIcon(Icons.EYE_BLUE);
         } else {
             presentation.setText("Enable File Watching");
             presentation.setDescription("Start watching files for changes");
             // Gray eye icon when stopped
-            presentation.setIcon(IconUtil.colorize(AllIcons.Actions.Show, JBColor.GRAY));
+            presentation.setIcon(Icons.EYE_GRAY);
         }
     }
 }
